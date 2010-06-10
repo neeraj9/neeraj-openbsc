@@ -72,6 +72,9 @@ static const struct rate_ctr_group_desc bssgp_ctrg_desc = {
 
 LLIST_HEAD(bssgp_bvc_ctxts);
 
+static int _bssgp_tx_dl_ud(struct bssgp_flow_control *fc, struct msgb *msg,
+			   uint32_t llc_pdu_len, void *priv);
+
 /* Find a BTS Context based on parsed RA ID and Cell ID */
 struct bssgp_bvc_ctx *btsctx_by_raid_cid(const struct gprs_ra_id *raid, uint16_t cid)
 {
@@ -108,6 +111,7 @@ struct bssgp_bvc_ctx *btsctx_alloc(uint16_t bvci, uint16_t nsei)
 	ctx->nsei = nsei;
 	/* FIXME: BVCI is not unique, only BVCI+NSEI ?!? */
 	ctx->ctrg = rate_ctr_group_alloc(ctx, &bssgp_ctrg_desc, bvci);
+	ctx->fc.out_cb = &_bssgp_tx_dl_ud;
 
 	llist_add(&ctx->list, &bssgp_bvc_ctxts);
 
@@ -454,6 +458,103 @@ static int bssgp_rx_llc_disc(struct msgb *msg, struct tlv_parsed *tp,
 	return 0;
 }
 
+struct bssgp_fc_queue_element {
+	struct llist_head list;
+	struct msgb *msg;
+	uint32_t llc_pdu_len;
+	void *priv;
+};
+
+static int fc_enqueue(struct bssgp_flow_control *fc, struct msgb *msg,
+		      uint32_t llc_pdu_len, void *priv)
+{
+	struct bssgp_fc_queue_element *fcqe;
+
+	fcqe = talloc_zero(fc, struct bssgp_fc_queue_element);
+	if (!fcqe)
+		return -ENOMEM;
+	fcqe->msg = msg;
+	fcqe->llc_pdu_len = llc_pdu_len;
+	fcqe->priv = priv;
+
+	llist_add_tail(&fcqe->list, &fc->queue);
+
+	return 0;
+}
+
+/* According to Section 8.2 */
+static int bssgp_fc_needs_queueing(struct bssgp_flow_control *fc, uint32_t pdu_len)
+{
+	struct timeval time_now, time_diff;
+	int64_t bucket_predicted;
+	uint32_t csecs_elapsed, leaked;
+
+	/* if we already have pending messages in the queue, we
+	 * definietly have to enqueue the new message, too */
+	if (fc->queue_depth)
+		return 1;
+
+	gettimeofday(&time_now, NULL);
+	timersub(&time_now, &fc->time_last_pdu, &time_diff);
+	csecs_elapsed = time_diff.tv_sec*100 + time_diff.tv_usec/10000;
+
+	/* B' = B + L(p) - (Tc - Tp)*R */
+	leaked = csecs_elapsed * (fc->bucket_leak_rate / 100);
+	bucket_predicted = fc->bucket_counter + pdu_len;
+	bucket_predicted -= leaked;
+	if (bucket_predicted < pdu_len) {
+		bucket_predicted = pdu_len;
+		goto pass;
+	}
+	if (bucket_predicted <= fc->bucket_size_max) {
+		fc->bucket_counter = bucket_predicted;
+		goto pass;
+	}
+
+	/* if we reach here, the PDU needs to be delayed */
+	return 1;
+
+pass:
+	/* if we reach here, the PDU can pass */
+	fc->time_last_pdu = time_now;
+	return 0;
+}
+
+/* output callback for BVC flow control */
+static int _bssgp_tx_dl_ud(struct bssgp_flow_control *fc, struct msgb *msg,
+			   uint32_t llc_pdu_len, void *priv)
+{
+	return gprs_ns_sendmsg(bssgp_nsi, msg);
+}
+
+/* input function of the flow control implementation, called first
+ * for the MM flow control, and then as the MM flow control output
+ * callback in order to perform BVC flow control */
+int bssgp_fc_in(struct bssgp_flow_control *fc, struct msgb *msg,
+		uint32_t llc_pdu_len, void *priv)
+{
+	if (bssgp_fc_needs_queueing(fc, llc_pdu_len))
+		return fc_enqueue(fc, msg, llc_pdu_len, priv);
+	else
+		return fc->out_cb(priv, msg, llc_pdu_len, NULL);
+}
+
+/* Initialize the Flow Control parameters for a new MS according to
+ * default values for the BVC specified by BVCI and NSEI */
+int bssgp_fc_ms_init(struct bssgp_flow_control *fc_ms, uint16_t bvci,
+		     uint16_t nsei)
+{
+	struct bssgp_bvc_ctx *ctx;
+
+	ctx = btsctx_by_bvci_nsei(bvci, nsei);
+	if (!ctx)
+		return -ENODEV;
+	fc_ms->bucket_size_max = ctx->bmax_default_ms;
+	fc_ms->bucket_leak_rate = ctx->r_default_ms;
+
+	return 0;
+}
+
 static int bssgp_rx_fc_bvc(struct msgb *msg, struct tlv_parsed *tp,
 			   struct bssgp_bvc_ctx *bctx)
 {
@@ -471,7 +572,18 @@ static int bssgp_rx_fc_bvc(struct msgb *msg, struct tlv_parsed *tp,
 		return bssgp_tx_status(BSSGP_CAUSE_MISSING_MAND_IE, NULL, msg);
 	}
 
-	/* FIXME: actually implement flow control */
+	/* 11.3.5 */
+	bctx->fc.bucket_size_max = 100 *
+		ntohs(*(uint16_t *)TLVP_VAL(tp, BSSGP_IE_BVC_BUCKET_SIZE));
+	/* 11.3.4 */
+	bctx->fc.bucket_leak_rate = 100 *
+		ntohs(*(uint16_t *)TLVP_VAL(tp, BSSGP_IE_BUCKET_LEAK_RATE));
+	/* 11.3.2 */
+	bctx->bmax_default_ms = 100 *
+		ntohs(*(uint16_t *)TLVP_VAL(tp, BSSGP_IE_BMAX_DEFAULT_MS));
+	/* 11.3.32 */
+	bctx->r_default_ms = 100 *
+		ntohs(*(uint16_t *)TLVP_VAL(tp, BSSGP_IE_R_DEFAULT_MS));
 
 	/* Send FLOW_CONTROL_BVC_ACK */
 	return bssgp_tx_fc_bvc_ack(msgb_nsei(msg), *TLVP_VAL(tp, BSSGP_IE_TAG),
@@ -724,8 +836,9 @@ int gprs_bssgp_tx_dl_ud(struct msgb *msg, struct sgsn_mm_ctx *mmctx)
 
 	bctx = btsctx_by_bvci_nsei(bvci, nsei);
 	if (!bctx) {
-		/* FIXME: don't simply create missing context, but reject message */
-		bctx = btsctx_alloc(bvci, nsei);
+		LOGP(DBSSGP, LOGL_ERROR, "Cannot send DL-UD to unknown BVCI %u\n",
+			bvci);
+		return -ENODEV;
 	}
 
 	if (msg->len > TVLV_MAX_ONEBYTE)
@@ -789,7 +902,8 @@ int gprs_bssgp_tx_dl_ud(struct msgb *msg, struct sgsn_mm_ctx *mmctx)
 
 	/* Identifiers down: BVCI, NSEI (in msgb->cb) */
 
-	return gprs_ns_sendmsg(bssgp_nsi, msg);
+	return bssgp_fc_in(&mmctx->fc, msg, msg_len, &bctx->fc);
+
 }
 
 /* Send a single GMM-PAGING.req to a given NSEI/NS-BVCI */
