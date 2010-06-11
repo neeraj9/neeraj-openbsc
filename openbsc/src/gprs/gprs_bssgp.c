@@ -465,6 +465,64 @@ struct bssgp_fc_queue_element {
 	void *priv;
 };
 
+static int fc_queue_timer_cfg(struct bssgp_flow_control *fc);
+static int bssgp_fc_needs_queueing(struct bssgp_flow_control *fc, uint32_t pdu_len);
+
+static void fc_timer_cb(void *data)
+{
+	struct bssgp_flow_control *fc = data;
+	struct bssgp_fc_queue_element *fcqe;
+
+	/* if the queue is empty, we return without sending something
+	 * and without re-starting the timer */
+	if (llist_empty(&fc->queue))
+		return;
+
+	/* get the first entry from the queue */
+	fcqe = llist_entry(&fc->queue.next, struct bssgp_fc_queue_element,
+			   list);
+
+	if (bssgp_fc_needs_queueing(fc, fcqe->llc_pdu_len)) {
+		LOGP(DBSSGP, LOGL_NOTICE, "BSSGP-FC: fc_timer_cb() but still "
+			"not able to send PDU of %u bytes\n", fcqe->llc_pdu_len);
+		/* make sure we re-start the timer */
+		fc_queue_timer_cfg(fc);
+		return;
+	}
+
+	/* remove from the queue */
+	llist_del(&fcqe->list);
+
+	fc->out_cb(fcqe->priv, fcqe->msg, fcqe->llc_pdu_len, NULL);
+	/* we expect that out_cb will in the end free the msgb once
+	 * it is no longer needed */
+
+	talloc_free(fcqe);
+}
+
+static int fc_queue_timer_cfg(struct bssgp_flow_control *fc)
+{
+	struct bssgp_fc_queue_element *fcqe;
+	uint32_t msecs;
+
+	if (llist_empty(&fc->queue))
+		return 0;
+
+	fcqe = llist_entry(&fc->queue.next, struct bssgp_fc_queue_element,
+			   list);
+
+	/* Calculate the point in time at which we will have leaked
+	 * a sufficient number of bytes from the bucket to transmit
+	 * the first PDU in the queue */
+	msecs = (fcqe->llc_pdu_len * 1000) / fc->bucket_leak_rate;
+
+	fc->timer.data = fc;
+	fc->timer.cb = &fc_timer_cb;
+	bsc_schedule_timer(&fc->timer, msecs / 1000, (msecs % 1000) * 1000);
+
+	return 0;
+}
+
 static int fc_enqueue(struct bssgp_flow_control *fc, struct msgb *msg,
 		      uint32_t llc_pdu_len, void *priv)
 {

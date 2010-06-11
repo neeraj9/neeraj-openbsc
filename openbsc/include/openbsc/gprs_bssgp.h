@@ -2,6 +2,8 @@
 #define _GPRS_BSSGP_H
 
 #include <stdint.h>
+#include <osmocore/timer.h>
+#include <osmocore/linuxlist.h>
 
 /* Section 5.4.1 */
 #define BVCI_SIGNALLING	0x0000
@@ -165,6 +167,7 @@ struct bssgp_flow_control {
 	uint32_t max_queue_depth;
 	uint32_t queue_depth;
 	struct llist_head queue;
+	struct timer_list timer;
 	/* callback to be called at output of flow control */
 	int (*out_cb)(struct bssgp_flow_control *fc, struct msgb *msg,
 			uint32_t llc_pdu_len, void *priv);
