@@ -458,10 +458,15 @@ static int bssgp_rx_llc_disc(struct msgb *msg, struct tlv_parsed *tp,
 	return 0;
 }
 
+/* One element (msgb) in a BSSGP Flow Control queue */
 struct bssgp_fc_queue_element {
+	/* linked list of queue elements */
 	struct llist_head list;
+	/* The message that we have enqueued */
 	struct msgb *msg;
+	/* Length of the LLC PDU part of the contained message */
 	uint32_t llc_pdu_len;
+	/* private pointer passed to the flow control out_cb function */
 	void *priv;
 };
 
@@ -472,6 +477,7 @@ static void fc_timer_cb(void *data)
 {
 	struct bssgp_flow_control *fc = data;
 	struct bssgp_fc_queue_element *fcqe;
+	struct timeval time_now;
 
 	/* if the queue is empty, we return without sending something
 	 * and without re-starting the timer */
@@ -493,13 +499,26 @@ static void fc_timer_cb(void *data)
 	/* remove from the queue */
 	llist_del(&fcqe->list);
 
+	/* record the time we transmitted this PDU */
+	gettimeofday(&time_now, NULL);
+	fc->time_last_pdu = time_now;
+
+	/* call the output callback for this FC instance */
 	fc->out_cb(fcqe->priv, fcqe->msg, fcqe->llc_pdu_len, NULL);
+
 	/* we expect that out_cb will in the end free the msgb once
 	 * it is no longer needed */
 
+	/* but we have to free the queue element ourselves */
 	talloc_free(fcqe);
+
+	/* re-configure the timer for the next PDU */
+	fc_queue_timer_cfg(fc);
 }
 
+/* configure/schedule the flow control timer to expire once the bucket
+ * will have leaked a sufficient number of bytes to transmit the next
+ * PDU in the queue */
 static int fc_queue_timer_cfg(struct bssgp_flow_control *fc)
 {
 	struct bssgp_fc_queue_element *fcqe;
@@ -515,6 +534,8 @@ static int fc_queue_timer_cfg(struct bssgp_flow_control *fc)
 	 * a sufficient number of bytes from the bucket to transmit
 	 * the first PDU in the queue */
 	msecs = (fcqe->llc_pdu_len * 1000) / fc->bucket_leak_rate;
+	/* FIXME: add that time to fc->time_last_pdu and subtract it from
+	 * current time */
 
 	fc->timer.data = fc;
 	fc->timer.cb = &fc_timer_cb;
@@ -523,6 +544,7 @@ static int fc_queue_timer_cfg(struct bssgp_flow_control *fc)
 	return 0;
 }
 
+/* Enqueue a PDU in the flow control queue for delayed transmission */
 static int fc_enqueue(struct bssgp_flow_control *fc, struct msgb *msg,
 		      uint32_t llc_pdu_len, void *priv)
 {
@@ -536,6 +558,9 @@ static int fc_enqueue(struct bssgp_flow_control *fc, struct msgb *msg,
 	fcqe->priv = priv;
 
 	llist_add_tail(&fcqe->list, &fc->queue);
+
+	/* re-configure the timer for dequeueing the pdu */
+	fc_queue_timer_cfg(fc);
 
 	return 0;
 }
@@ -552,29 +577,39 @@ static int bssgp_fc_needs_queueing(struct bssgp_flow_control *fc, uint32_t pdu_l
 	if (fc->queue_depth)
 		return 1;
 
+	/* B' = B + L(p) - (Tc - Tp)*R */
+
+	/* compute number of centi-seconds that have elapsed since transmitting
+	 * the last PDU (Tc - Tp) */
 	gettimeofday(&time_now, NULL);
 	timersub(&time_now, &fc->time_last_pdu, &time_diff);
 	csecs_elapsed = time_diff.tv_sec*100 + time_diff.tv_usec/10000;
 
-	/* B' = B + L(p) - (Tc - Tp)*R */
+	/* compute number of bytes that have leaked in the elapsed number
+	 * of centi-seconds */
 	leaked = csecs_elapsed * (fc->bucket_leak_rate / 100);
+	/* add the current PDU length to the last bucket level */
 	bucket_predicted = fc->bucket_counter + pdu_len;
+	/* ... and subtract the number of leaked bytes */
 	bucket_predicted -= leaked;
+
 	if (bucket_predicted < pdu_len) {
+		/* this is just to make sure the bucket doesn't underflow */
 		bucket_predicted = pdu_len;
 		goto pass;
 	}
+
 	if (bucket_predicted <= fc->bucket_size_max) {
+		/* the bucket is not full yet, we can pass the packet */
 		fc->bucket_counter = bucket_predicted;
 		goto pass;
 	}
 
-	/* if we reach here, the PDU needs to be delayed */
+	/* bucket is full, PDU needs to be delayed */
 	return 1;
 
 pass:
 	/* if we reach here, the PDU can pass */
-	fc->time_last_pdu = time_now;
 	return 0;
 }
 
@@ -591,10 +626,16 @@ static int _bssgp_tx_dl_ud(struct bssgp_flow_control *fc, struct msgb *msg,
 int bssgp_fc_in(struct bssgp_flow_control *fc, struct msgb *msg,
 		uint32_t llc_pdu_len, void *priv)
 {
-	if (bssgp_fc_needs_queueing(fc, llc_pdu_len))
+	struct timeval time_now;
+
+	if (bssgp_fc_needs_queueing(fc, llc_pdu_len)) {
 		return fc_enqueue(fc, msg, llc_pdu_len, priv);
-	else
+	} else {
+		/* record the time we transmitted this PDU */
+		gettimeofday(&time_now, NULL);
+		fc->time_last_pdu = time_now;
 		return fc->out_cb(priv, msg, llc_pdu_len, NULL);
+	}
 }
 
 /* Initialize the Flow Control parameters for a new MS according to
