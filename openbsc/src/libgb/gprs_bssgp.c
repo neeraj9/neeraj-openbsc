@@ -561,7 +561,7 @@ static int fc_queue_timer_cfg(struct bssgp_flow_control *fc)
 
 	fc->timer.data = fc;
 	fc->timer.cb = &fc_timer_cb;
-	bsc_schedule_timer(&fc->timer, msecs / 1000, (msecs % 1000) * 1000);
+	osmo_timer_schedule(&fc->timer, msecs / 1000, (msecs % 1000) * 1000);
 
 	return 0;
 }
