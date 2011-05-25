@@ -13,6 +13,11 @@ struct sgsn_config {
 	char *gtp_statedir;
 	struct sockaddr_in gtp_listenaddr;
 
+	/* port configuration */
+	int local_gtp0_port;
+	int local_gtp1c_port;
+	int local_gtp1u_port;
+
 	/* misc */
 	struct gprs_ns_inst *nsi;
 };

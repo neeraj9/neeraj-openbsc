@@ -557,8 +557,15 @@ int sgsn_gtp_init(struct sgsn_instance *sgi)
 	int rc;
 	struct gsn_t *gsn;
 
-	rc = gtp_new(&sgi->gsn, sgi->cfg.gtp_statedir,
-		     &sgi->cfg.gtp_listenaddr.sin_addr, GTP_MODE_SGSN);
+	rc = gtp_new_generic(&sgi->gsn, sgi->cfg.gtp_statedir,
+			     &sgi->cfg.gtp_listenaddr.sin_addr, GTP_MODE_SGSN,
+			     sgi->cfg.local_gtp0_port,
+			     sgi->cfg.local_gtp1c_port,
+			     sgi->cfg.local_gtp1u_port,
+			     /* assume that ggsn always uses the default port */
+			     GTP0_PORT,
+			     GTP1C_PORT,
+			     GTP1U_PORT);
 	if (rc) {
 		LOGP(DGPRS, LOGL_ERROR, "Failed to create GTP: %d\n", rc);
 		return rc;

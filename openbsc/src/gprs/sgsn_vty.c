@@ -38,6 +38,7 @@
 #include <osmocom/vty/misc.h>
 
 #include <pdp.h>
+#include <gtp.h>
 
 static struct sgsn_config *g_cfg = NULL;
 
@@ -119,6 +120,10 @@ static int config_write_sgsn(struct vty *vty)
 	vty_out(vty, " gtp local-ip %s%s",
 		inet_ntoa(g_cfg->gtp_listenaddr.sin_addr), VTY_NEWLINE);
 
+	vty_out(vty, " gtp local-gtp0-port %d%s", GTP0_PORT, VTY_NEWLINE);
+	vty_out(vty, " gtp local-gtp1c-port %d%s", GTP1C_PORT, VTY_NEWLINE);
+	vty_out(vty, " gtp local-gtp1u-port %d%s", GTP1U_PORT, VTY_NEWLINE);
+
 	llist_for_each_entry(gctx, &sgsn_ggsn_ctxts, list) {
 		vty_out(vty, " ggsn %u remote-ip %s%s", gctx->id,
 			inet_ntoa(gctx->remote_addr), VTY_NEWLINE);
@@ -136,6 +141,36 @@ DEFUN(cfg_sgsn, cfg_sgsn_cmd,
 	SGSN_STR)
 {
 	vty->node = SGSN_NODE;
+	return CMD_SUCCESS;
+}
+
+DEFUN(cfg_sgsn_local_gtp0_port, cfg_sgsn_local_gtp0_port_cmd,
+	"gtp local-gtp0-port <0-65535>",
+	"GTP Parameters\n"
+	"Set the GTP0 port for the local GTP bind\n")
+{
+	g_cfg->local_gtp0_port = atoi(argv[0]);
+
+	return CMD_SUCCESS;
+}
+
+DEFUN(cfg_sgsn_local_gtp1c_port, cfg_sgsn_local_gtp1c_port_cmd,
+	"gtp local-gtp1c-port <0-65535>",
+	"GTP Parameters\n"
+	"Set the GTP1C port for the local GTP bind\n")
+{
+	g_cfg->local_gtp1c_port = atoi(argv[0]);
+
+	return CMD_SUCCESS;
+}
+
+DEFUN(cfg_sgsn_local_gtp1u_port, cfg_sgsn_local_gtp1u_port_cmd,
+	"gtp local-gtp1u-port <0-65535>",
+	"GTP Parameters\n"
+	"Set the GTP1U port for the local GTP bind\n")
+{
+	g_cfg->local_gtp1u_port = atoi(argv[0]);
+
 	return CMD_SUCCESS;
 }
 
@@ -335,6 +370,9 @@ int sgsn_vty_init(void)
 	install_element(SGSN_NODE, &ournode_exit_cmd);
 	install_element(SGSN_NODE, &ournode_end_cmd);
 	install_element(SGSN_NODE, &cfg_sgsn_bind_addr_cmd);
+	install_element(SGSN_NODE, &cfg_sgsn_local_gtp0_port_cmd);
+	install_element(SGSN_NODE, &cfg_sgsn_local_gtp1c_port_cmd);
+	install_element(SGSN_NODE, &cfg_sgsn_local_gtp1u_port_cmd);
 	install_element(SGSN_NODE, &cfg_ggsn_remote_ip_cmd);
 	//install_element(SGSN_NODE, &cfg_ggsn_remote_port_cmd);
 	install_element(SGSN_NODE, &cfg_ggsn_gtp_version_cmd);
