@@ -103,14 +103,16 @@ struct bssgp_bvc_ctx *btsctx_by_bvci_nsei(uint16_t bvci, uint16_t nsei)
 struct bssgp_bvc_ctx *btsctx_alloc(uint16_t bvci, uint16_t nsei)
 {
 	struct bssgp_bvc_ctx *ctx;
+	unsigned int idx = 0;
 
 	ctx = talloc_zero(bssgp_tall_ctx, struct bssgp_bvc_ctx);
 	if (!ctx)
 		return NULL;
 	ctx->bvci = bvci;
 	ctx->nsei = nsei;
-	/* FIXME: BVCI is not unique, only BVCI+NSEI ?!? */
-	ctx->ctrg = rate_ctr_group_alloc(ctx, &bssgp_ctrg_desc, bvci);
+	idx = ((bvci & 0xffff) << 16) | (nsei & 0xffff);
+
+	ctx->ctrg = rate_ctr_group_alloc(ctx, &bssgp_ctrg_desc, idx);
 	ctx->fc.out_cb = &_bssgp_tx_dl_ud;
 
 	llist_add(&ctx->list, &bssgp_bvc_ctxts);
