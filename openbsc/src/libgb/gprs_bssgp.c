@@ -134,6 +134,26 @@ static int bssgp_tx_fc_bvc_ack(uint16_t nsei, uint8_t tag, uint16_t ns_bvci)
 	return gprs_ns_sendmsg(bssgp_nsi, msg);
 }
 
+/* Chapter 10.4.6: Flow Control MS ACK */
+static int bssgp_tx_fc_ms_ack(uint16_t nsei, uint32_t tlli,
+			      uint8_t tag, uint16_t ns_bvci)
+{
+	uint32_t _tlli;
+	struct msgb *msg = bssgp_msgb_alloc();
+	struct bssgp_normal_hdr *bgph =
+			(struct bssgp_normal_hdr *) msgb_put(msg, sizeof(*bgph));
+
+	msgb_nsei(msg) = nsei;
+	msgb_bvci(msg) = ns_bvci;
+
+	bgph->pdu_type = BSSGP_PDUT_FLOW_CONTROL_MS_ACK;
+	_tlli = htonl(tlli);
+	msgb_tvlv_put(msg, BSSGP_IE_TLLI, 4, (uint8_t *) &_tlli);
+	msgb_tvlv_put(msg, BSSGP_IE_TAG, 1, &tag);
+
+	return gprs_ns_sendmsg(bssgp_nsi, msg);
+}
+
 /* 10.3.7 SUSPEND-ACK PDU */
 int bssgp_tx_suspend_ack(uint16_t nsei, uint32_t tlli,
 			 const struct gprs_ra_id *ra_id, uint8_t suspend_ref)
@@ -689,6 +709,31 @@ static int bssgp_rx_fc_bvc(struct msgb *msg, struct tlv_parsed *tp,
 				   msgb_bvci(msg));
 }
 
+static int bssgp_rx_fc_ms(struct msgb *msg, struct tlv_parsed *tp,
+			  struct bssgp_bvc_ctx *bctx)
+{
+	uint32_t tlli;
+
+	DEBUGP(DBSSGP, "BSSGP BVCI=%u Rx Flow Control MS\n",
+		bctx->bvci);
+
+	if (!TLVP_PRESENT(tp, BSSGP_IE_TLLI) ||
+	    !TLVP_PRESENT(tp, BSSGP_IE_TAG) ||
+	    !TLVP_PRESENT(tp, BSSGP_IE_MS_BUCKET_SIZE) ||
+	    !TLVP_PRESENT(tp, BSSGP_IE_BUCKET_LEAK_RATE)) {
+		LOGP(DBSSGP, LOGL_ERROR, "BSSGP BVCI=%u Rx FC MS "
+			"missing mandatory IE\n", bctx->bvci);
+		return bssgp_tx_status(BSSGP_CAUSE_MISSING_MAND_IE, NULL, msg);
+	}
+
+	/* FIXME: actually implement flow control */
+
+	tlli = ntohl(*(uint32_t *)TLVP_VAL(tp, BSSGP_IE_TLLI));
+	return bssgp_tx_fc_ms_ack(msgb_nsei(msg), tlli,
+				  *TLVP_VAL(tp, BSSGP_IE_TAG),
+				  msgb_bvci(msg));
+}
+
 /* Receive a BSSGP PDU from a BSS on a PTP BVCI */
 static int gprs_bssgp_rx_ptp(struct msgb *msg, struct tlv_parsed *tp,
 			     struct bssgp_bvc_ctx *bctx)
@@ -732,7 +777,8 @@ static int gprs_bssgp_rx_ptp(struct msgb *msg, struct tlv_parsed *tp,
 		DEBUGP(DBSSGP, "BSSGP BVCI=%u Rx Flow Control MS\n",
 			bctx->bvci);
 		/* FIXME: actually implement flow control */
-		/* FIXME: Send FLOW_CONTROL_MS_ACK */
+		/* Send FLOW_CONTROL_MS_ACK */
+		rc = bssgp_rx_fc_ms(msg, tp, bctx);
 		break;
 	case BSSGP_PDUT_STATUS:
 		/* Some exception has occurred */
