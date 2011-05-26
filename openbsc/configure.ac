@@ -22,6 +22,10 @@ AC_SEARCH_LIBS(gtp_new, gtp,
 
 AM_CONDITIONAL(HAVE_LIBGTP, test "x$GPRS_LIBGTP" != "x")
 
+if test "x$ALLOW_ALL_IMSI" != "x"; then
+  AC_DEFINE([ALLOW_ALL_IMSI], [1], [Define if you want sgsn to allow all mobiles getting in the network without verification.])
+fi
+
 
 AC_ARG_ENABLE([nat], [AS_HELP_STRING([--enable-nat], [Build the BSC NAT. Requires SCCP])],
     [

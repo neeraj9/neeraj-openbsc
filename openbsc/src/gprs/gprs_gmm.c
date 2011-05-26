@@ -689,6 +689,7 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 #if 0
 			return gsm48_tx_gmm_att_rej(msg, GMM_CAUSE_IMSI_UNKNOWN);
 #else
+#ifndef ALLOW_ALL_IMSI /* check for IMSI only if not overridden */
 			/* As a temorary hack, we simply assume that the IMSI exists,
 			 * as long as it is part of 'our' network */
 			char mccmnc[16];
@@ -699,6 +700,7 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 				return gsm48_tx_gmm_att_rej_oldmsg(msg,
 								GMM_CAUSE_GPRS_NOTALLOWED);
 			}
+#endif /* ifndef ALLOW_ALL_IMSI */
 			ctx = sgsn_mm_ctx_alloc(0, &ra_id);
 			if (!ctx)
 				return gsm48_tx_gmm_att_rej_oldmsg(msg, GMM_CAUSE_NET_FAIL);
