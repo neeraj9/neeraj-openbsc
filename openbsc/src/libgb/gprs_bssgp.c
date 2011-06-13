@@ -758,8 +758,8 @@ static int gprs_bssgp_rx_ptp(struct msgb *msg, struct tlv_parsed *tp,
 		/* some LLC data from the MS */
 		rc = bssgp_rx_ul_ud(msg, tp, bctx);
 		break;
-	case BSSGP_PDUT_RA_CAPABILITY:
-		/* BSS requests RA capability or IMSI */
+	case BSSGP_PDUT_RA_CAPA_UDPATE:
+		/* BSS requests RA capability Update or IMSI */
 		DEBUGP(DBSSGP, "BSSGP BVCI=%u Rx RA CAPABILITY UPDATE\n",
 			bctx->bvci);
 		/* FIXME: send GMM_RA_CAPABILITY_UPDATE.ind to GMM */
@@ -801,6 +801,7 @@ static int gprs_bssgp_rx_ptp(struct msgb *msg, struct tlv_parsed *tp,
 	case BSSGP_PDUT_RA_CAPA_UPDATE_ACK:
 	case BSSGP_PDUT_FLOW_CONTROL_BVC_ACK:
 	case BSSGP_PDUT_FLOW_CONTROL_MS_ACK:
+	case BSSGP_PDUT_RA_CAPABILITY:
 		DEBUGP(DBSSGP, "BSSGP BVCI=%u PDU type 0x%02x only exists "
 			"in DL\n", bctx->bvci, pdu_type);
 		bssgp_tx_status(BSSGP_CAUSE_PROTO_ERR_UNSPEC, NULL, msg);
