@@ -14,6 +14,12 @@ AC_PROG_CC
 AC_PROG_INSTALL
 AC_PROG_RANLIB
 
+# define hackish variables
+# HACK: enable dirty fixes before better ones are made
+AC_DEFINE(DIRTY_HACK, [1], [enable dirty fixes before making better ones])
+# HACK: Allow all IMSI's to latch to this network
+AC_DEFINE(ALLOW_ALL_IMSI, [1], [Allow all IMSI to latch to this network])
+
 dnl checks for libraries
 AC_SEARCH_LIBS(crypt, crypt,
     [LIBCRYPT="-lcrypt"; AC_DEFINE([VTY_CRYPT_PW], [], [Use crypt functionality of vty.])])

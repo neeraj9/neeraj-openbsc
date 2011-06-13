@@ -35,6 +35,8 @@
 #include <openbsc/gprs_llc.h>
 #include <openbsc/crc24.h>
 
+#include "../../bscconfig.h" /* make use of any defines in configure.ac */
+
 /* Section 8.9.9 LLC layer parameter default values */
 static const struct gprs_llc_params llc_default_params[] = {
 	[1] = {
@@ -755,6 +757,15 @@ int gprs_llc_rcvmsg(struct msgb *msg, struct tlv_parsed *tv)
 
 	/* Receive and Process the actual LLC frame */
 	rc = gprs_llc_hdr_rx(&llhp, lle);
+#ifdef DIRTY_HACK
+	if ((rc < 0) && (llhp.seq_tx < lle->vu_recv) && (llhp.seq_tx == 0) &&
+	    (llhp.data > 0) && (llhp.sapi == GPRS_SAPI_GMM))
+	{
+		msgb_gmmh(msg) = llhp.data;
+		rc = gsm0408_gprs_out_of_seq_rcvmsg(msg, lle->llme);
+		return rc;
+	}
+#endif
 	if (rc < 0)
 		return rc;
 
@@ -845,6 +856,26 @@ int gprs_llgmm_assign(struct gprs_llc_llme *llme,
 
 	return 0;
 }
+
+#ifdef DIRTY_HACK
+/* XXX hack: reset vu_recv to 0 to allow reception of messages from MS */
+void gprs_llgmm_reset_state(struct gprs_llc_llme *llme)
+{
+	unsigned int i;
+
+	LOGP(DLLC, LOGL_NOTICE, "LLC RX: reset state variable for TLLI 0x%08x",
+	     llme->tlli);
+	/* 8.5.3.1 For all LLE's */
+	for (i = 0; i < ARRAY_SIZE(llme->lle); i++) {
+		struct gprs_llc_lle *l = &llme->lle[i];
+		l->vu_recv = 0; /* lets not mess with send state variable now */
+		/* l->vu_send = l->vu_recv = 0; */
+		l->retrans_ctr = 0;
+		l->state = GPRS_LLES_ASSIGNED_ADM;
+		/* FIXME Set parameters according to table 9 */
+	}
+}
+#endif
 
 int gprs_llc_init(const char *cipher_plugin_path)
 {

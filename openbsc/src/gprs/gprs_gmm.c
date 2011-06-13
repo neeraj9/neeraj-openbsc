@@ -53,6 +53,8 @@
 
 #include <pdp.h>
 
+#include "../../bscconfig.h" /* make use of any defines in configure.ac */
+
 #define PTMSI_ALLOC
 
 /* Section 11.2.2 / Table 11.4 MM timers netowkr side */
@@ -1515,6 +1517,50 @@ static int gsm0408_rcv_gsm(struct sgsn_mm_ctx *mmctx, struct msgb *msg,
 
 	return rc;
 }
+
+#ifdef DIRTY_HACK
+int gsm0408_gprs_out_of_seq_rcvmsg(struct msgb *msg, struct gprs_llc_llme *llme)
+{
+	struct gsm48_hdr *gh = (struct gsm48_hdr *) msgb_gmmh(msg);
+	uint8_t pdisc = gh->proto_discr & 0x0f;
+	struct sgsn_mm_ctx *mmctx;
+	struct gprs_ra_id ra_id;
+	int rc = -EINVAL;
+
+	LOGP(DMM, LOGL_NOTICE, "Out of sequence message from peer"
+	     "TLLI=%08x\n", msgb_tlli(msg));
+	bssgp_parse_cell_id(&ra_id, msgb_bcid(msg));
+	mmctx = sgsn_mm_ctx_by_tlli(msgb_tlli(msg), &ra_id);
+	if (mmctx) {
+		msgid2mmctx(mmctx, msg);
+		rate_ctr_inc(&mmctx->ctrg->ctr[GMM_CTR_PKTS_SIG_IN]);
+		mmctx->llme = llme;
+	}
+
+	/* MMCTX can be NULL */
+
+	switch (pdisc) {
+	case GSM48_PDISC_MM_GPRS:
+		if (gh->msg_type == GSM48_MT_GMM_ATTACH_REQ)
+		{
+			if (mmctx->mm_state == GMM_DEREGISTERED)
+			{
+				gprs_llgmm_reset_state(llme);
+			}
+			else if (mmctx->T == 3350)
+			{
+				gprs_llgmm_reset_state(llme);
+			}
+		}
+		LOGP(DMM, LOGL_NOTICE, "Out of sequence message from peer"
+		     "TLLI=%08x\n is actually GMM_ATTACH_REQ", msgb_tlli(msg));
+		rc = gsm0408_rcv_gmm(mmctx, msg, llme);
+		break;
+	}
+
+	return rc;
+}
+#endif
 
 /* Main entry point for incoming 04.08 GPRS messages */
 int gsm0408_gprs_rcvmsg(struct msgb *msg, struct gprs_llc_llme *llme)

@@ -156,6 +156,11 @@ int gprs_llgmm_assign(struct gprs_llc_llme *llme,
 		      uint32_t old_tlli, uint32_t new_tlli,
 		      enum gprs_ciph_algo alg, const uint8_t *kc);
 
+#ifdef DIRTY_HACK
+/* Hack: reset llc parameters */
+void gprs_llgmm_reset_state(struct gprs_llc_llme *llme);
+#endif
+
 int gprs_llc_init(const char *cipher_plugin_path);
 int gprs_llc_vty_init(void);
 
