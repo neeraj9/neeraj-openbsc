@@ -34,6 +34,7 @@
 #include <osmocom/gsm/gsm0808.h>
 
 #include <osmocom/gsm/protocol/gsm_08_08.h>
+#include <osmocom/gsm/protocol/gsm_04_11.h>
 
 #include <osmocom/sccp/sccp.h>
 
@@ -94,6 +95,9 @@ struct bsc_nat *bsc_nat_alloc(void)
 	INIT_LLIST_HEAD(&nat->bsc_configs);
 	INIT_LLIST_HEAD(&nat->access_lists);
 	INIT_LLIST_HEAD(&nat->dests);
+	INIT_LLIST_HEAD(&nat->num_rewr);
+	INIT_LLIST_HEAD(&nat->smsc_rewr);
+	INIT_LLIST_HEAD(&nat->tpdest_match);
 
 	nat->stats.sccp.conn = osmo_counter_alloc("nat.sccp.conn");
 	nat->stats.sccp.calls = osmo_counter_alloc("nat.sccp.calls");
@@ -798,45 +802,57 @@ int bsc_write_cb(struct osmo_fd *bfd, struct msgb *msg)
 	return rc;
 }
 
+static char *rewrite_non_international(struct bsc_nat *nat, void *ctx, const char *imsi,
+				       struct gsm_mncc_number *called)
+{
+	struct bsc_nat_num_rewr_entry *entry;
+	char *new_number = NULL;
+
+	if (llist_empty(&nat->num_rewr))
+		return NULL;
+
+	if (called->plan != 1)
+		return NULL;
+	if (called->type == 1)
+		return NULL;
+
+	/* need to find a replacement and then fix it */
+	llist_for_each_entry(entry, &nat->num_rewr, list) {
+		regmatch_t matches[2];
+
+		/* check the IMSI match */
+		if (regexec(&entry->msisdn_reg, imsi, 0, NULL, 0) != 0)
+			continue;
+
+		/* this regexp matches... */
+		if (regexec(&entry->num_reg, called->number, 2, matches, 0) == 0 &&
+		    matches[1].rm_eo != -1)
+			new_number = talloc_asprintf(ctx, "%s%s",
+					entry->replace,
+					&called->number[matches[1].rm_so]);
+		if (new_number)
+			break;
+	}
+
+	return new_number;
+}
+
+
 /**
  * Rewrite non global numbers... according to rules based on the IMSI
  */
-struct msgb *bsc_nat_rewrite_setup(struct bsc_nat *nat, struct msgb *msg, struct bsc_nat_parsed *parsed, const char *imsi)
+static struct msgb *rewrite_setup(struct bsc_nat *nat, struct msgb *msg,
+				  struct bsc_nat_parsed *parsed, const char *imsi,
+				  struct gsm48_hdr *hdr48, const uint32_t len)
 {
 	struct tlv_parsed tp;
-	struct gsm48_hdr *hdr48;
-	uint32_t len;
-	uint8_t msg_type, proto;
 	unsigned int payload_len;
 	struct gsm_mncc_number called;
-	struct osmo_config_entry *entry;
+	struct msgb *out;
 	char *new_number = NULL;
-	struct msgb *out, *sccp;
 	uint8_t *outptr;
 	const uint8_t *msgptr;
 	int sec_len;
-
-	if (!imsi || strlen(imsi) < 5)
-		return msg;
-
-	if (!nat->num_rewr)
-		return msg;
-
-	/* only care about DTAP messages */
-	if (parsed->bssap != BSSAP_MSG_DTAP)
-		return msg;
-	if (!parsed->dest_local_ref)
-		return msg;
-
-	hdr48 = bsc_unpack_dtap(parsed, msg, &len);
-	if (!hdr48)
-		return msg;
-
-	proto = hdr48->proto_discr & 0x0f;
-	msg_type = hdr48->msg_type & 0xbf;
-	if (proto != GSM48_PDISC_CC ||
-	    msg_type != GSM48_MT_CC_SETUP)
-		return msg;
 
 	/* decode and rewrite the message */
 	payload_len = len - sizeof(*hdr48);
@@ -844,64 +860,24 @@ struct msgb *bsc_nat_rewrite_setup(struct bsc_nat *nat, struct msgb *msg, struct
 
 	/* no number, well let us ignore it */
 	if (!TLVP_PRESENT(&tp, GSM48_IE_CALLED_BCD))
-		return msg;
+		return NULL;
 
 	memset(&called, 0, sizeof(called));
 	gsm48_decode_called(&called,
 			    TLVP_VAL(&tp, GSM48_IE_CALLED_BCD) - 1);
 
 	/* check if it looks international and stop */
-	if (called.plan != 1)
-		return msg;
-	if (called.type == 1)
-		return msg;
-	if (strncmp(called.number, "00", 2) == 0)
-		return msg;
-
-	/* need to find a replacement and then fix it */
-	llist_for_each_entry(entry, &nat->num_rewr->entry, list) {
-		regex_t reg;
-		regmatch_t matches[2];
-
-		if (entry->mcc[0] != '*' && strncmp(entry->mcc, imsi, 3) != 0)
-			continue;
-		if (entry->mnc[0] != '*' && strncmp(entry->mnc, imsi + 3, 2) != 0)
-			continue;
-
-		if (entry->text[0] == '+') {
-			LOGP(DNAT, LOGL_ERROR,
-				"Plus is not allowed in the number");
-			continue;
-		}
-
-		/* We have an entry for the IMSI. Need to match now */
-		if (regcomp(&reg, entry->option, REG_EXTENDED) != 0) {
-			LOGP(DNAT, LOGL_ERROR,
-				"Regexp '%s' is not valid.\n", entry->option);
-			continue;
-		}
-
-		/* this regexp matches... */
-		if (regexec(&reg, called.number, 2, matches, 0) == 0 &&
-		    matches[1].rm_eo != -1)
-			new_number = talloc_asprintf(msg, "%s%s",
-					entry->text,
-					&called.number[matches[1].rm_so]);
-		regfree(&reg);
-
-		if (new_number)
-			break;
-	}
+	new_number = rewrite_non_international(nat, msg, imsi, &called);
 
 	if (!new_number) {
 		LOGP(DNAT, LOGL_DEBUG, "No IMSI match found, returning message.\n");
-		return msg;
+		return NULL;
 	}
 
 	if (strlen(new_number) > sizeof(called.number)) {
 		LOGP(DNAT, LOGL_ERROR, "Number is too long for structure.\n");
 		talloc_free(new_number);
-		return msg;
+		return NULL;
 	}
 
 	/*
@@ -914,7 +890,7 @@ struct msgb *bsc_nat_rewrite_setup(struct bsc_nat *nat, struct msgb *msg, struct
 	if (!out) {
 		LOGP(DNAT, LOGL_ERROR, "Failed to allocate.\n");
 		talloc_free(new_number);
-		return msg;
+		return NULL;
 	}
 
 	/* copy the header */
@@ -942,25 +918,324 @@ struct msgb *bsc_nat_rewrite_setup(struct bsc_nat *nat, struct msgb *msg, struct
 	outptr = msgb_put(out, sec_len);
 	memcpy(outptr, msgptr, sec_len);
 
+	talloc_free(new_number);
+	return out;
+}
+
+static struct msgb *rewrite_smsc(struct bsc_nat *nat, struct msgb *msg,
+				 struct bsc_nat_parsed *parsed, const char *imsi,
+				 struct gsm48_hdr *hdr48, const uint32_t len)
+{
+	unsigned int payload_len;
+	unsigned int cp_len;
+
+	uint8_t ref;
+	uint8_t orig_addr_len, *orig_addr_ptr;
+	uint8_t dest_addr_len, *dest_addr_ptr;
+	uint8_t data_len, *data_ptr;
+	char smsc_addr[30];
+	uint8_t new_addr[12];
+
+
+	uint8_t dest_len;
+	char _dest_nr[30];
+	char *dest_nr;
+	uint8_t dest_match = 0;
+
+	struct bsc_nat_num_rewr_entry *entry;
+	char *new_number = NULL;
+	uint8_t new_addr_len;
+	struct gsm48_hdr *new_hdr48;
+	struct msgb *out;
+
+	payload_len = len - sizeof(*hdr48);
+	if (payload_len < 1) {
+		LOGP(DNAT, LOGL_ERROR, "SMS too short for things. %d\n", payload_len);
+		return NULL;
+	}
+
+	cp_len = hdr48->data[0];
+	if (payload_len + 1 < cp_len) {
+		LOGP(DNAT, LOGL_ERROR, "SMS RPDU can not fit in: %d %d\n", cp_len, payload_len);
+		return NULL;
+	}
+
+	if (hdr48->data[1] != GSM411_MT_RP_DATA_MO)
+		return NULL;
+
+	if (cp_len < 5) {
+		LOGP(DNAT, LOGL_ERROR, "RD-DATA can not fit in the CP len: %d\n", cp_len);
+		return NULL;
+	}
+
+	ref = hdr48->data[2];
+	orig_addr_len = hdr48->data[3];
+	orig_addr_ptr = &hdr48->data[4];
+
+	/* the +1 is for checking if the following element has some space */
+	if (cp_len < 3 + orig_addr_len + 1) {
+		LOGP(DNAT, LOGL_ERROR, "RP-Originator addr does not fit: %d\n", orig_addr_len);
+		return NULL;
+	}
+
+	dest_addr_len = hdr48->data[3 + orig_addr_len + 1];
+	dest_addr_ptr = &hdr48->data[3 + orig_addr_len + 2];
+
+	if (cp_len < 3 + orig_addr_len + 1 + dest_addr_len + 1) {
+		LOGP(DNAT, LOGL_ERROR, "RP-Destination addr does not fit: %d\n", dest_addr_len);
+		return NULL;
+	}
+	gsm48_decode_bcd_number(smsc_addr, ARRAY_SIZE(smsc_addr), dest_addr_ptr - 1, 1);
+
+	data_len = hdr48->data[3 + orig_addr_len + 1 + dest_addr_len + 1];
+	data_ptr = &hdr48->data[3 + orig_addr_len + 1 + dest_addr_len + 2];
+
+	if (cp_len < 3 + orig_addr_len + 1 + dest_addr_len + 1 + data_len) {
+		LOGP(DNAT, LOGL_ERROR, "RP-Data does not fit: %d\n", data_len);
+		return NULL;
+	}
+
+	/* look into the phone number */
+	if ((data_ptr[0] & 0x01) != 1)
+		return NULL;
+
+	if (data_len < 3) {
+		LOGP(DNAT, LOGL_ERROR, "SMS-SUBMIT is too short.\n");
+		return NULL;
+	}
+
+	dest_len = data_ptr[2];
+	if (data_len < dest_len + 3 || dest_len < 2) {
+		LOGP(DNAT, LOGL_ERROR, "SMS-SUBMIT can not have TP-DestAddr.\n");
+		return NULL;
+	}
+
+	if ((data_ptr[3] & 0x80) == 0) {
+		LOGP(DNAT, LOGL_ERROR, "TP-DestAddr has extension. Not handled.\n");
+		return NULL;
+	}
+
+	if ((data_ptr[3] & 0x0F) == 0) {
+		LOGP(DNAT, LOGL_ERROR, "TP-DestAddr is not a ISDN number.\n");
+		return NULL;
+	}
+
+	gsm48_decode_bcd_number(_dest_nr + 2, ARRAY_SIZE(_dest_nr) - 2,
+				&data_ptr[2], 1);
+	if ((data_ptr[3] & 0x70) == 0x10) {
+		_dest_nr[0] = _dest_nr[1] = '0';
+		dest_nr = &_dest_nr[0];
+	} else {
+		dest_nr = &_dest_nr[2];
+	}
+
+	/* We will find a new number now */
+	llist_for_each_entry(entry, &nat->smsc_rewr, list) {
+		regmatch_t matches[2];
+
+		/* check the IMSI match */
+		if (regexec(&entry->msisdn_reg, imsi, 0, NULL, 0) != 0)
+			continue;
+
+		/* this regexp matches... */
+		if (regexec(&entry->num_reg, smsc_addr, 2, matches, 0) == 0 &&
+		    matches[1].rm_eo != -1)
+			new_number = talloc_asprintf(msg, "%s%s",
+					entry->replace,
+					&smsc_addr[matches[1].rm_so]);
+		if (new_number)
+			break;
+	}
+
+	if (!new_number)
+		return NULL;
+
+	/*
+	 * now match the number against another list
+	 */
+	llist_for_each_entry(entry, &nat->tpdest_match, list) {
+		/* check the IMSI match */
+		if (regexec(&entry->msisdn_reg, imsi, 0, NULL, 0) != 0)
+			continue;
+
+		if (regexec(&entry->num_reg, dest_nr, 0, NULL, 0) == 0) {
+			dest_match =1;
+			break;
+		}
+	}
+
+	if (!dest_match) {
+		talloc_free(new_number);
+		return NULL;
+	}
+
+	/*
+	 * We need to re-create the patched structure. This is why we have
+	 * saved the above pointers.
+	 */
+	out = msgb_alloc_headroom(4096, 128, "changed-smsc");
+	if (!out) {
+		LOGP(DNAT, LOGL_ERROR, "Failed to allocate.\n");
+		return NULL;
+	}
+
+	out->l3h = out->data;
+	msgb_v_put(out, GSM411_MT_RP_DATA_MO);
+	msgb_v_put(out, ref);
+	msgb_lv_put(out, orig_addr_len, orig_addr_ptr);
+
+	/*
+	 * Copy the new number. We let libosmocore encode it, then set
+	 * the extension followed after the length. For our convenience
+	 * we let the TLV code re-add the length so we start copying
+	 * from &new_addr[1].
+	 */
+	new_addr_len = gsm48_encode_bcd_number(new_addr, ARRAY_SIZE(new_addr),
+					       1, new_number);
+	new_addr[1] = 0x91;
+	msgb_lv_put(out, new_addr_len - 1, new_addr + 1);
+
+	msgb_lv_put(out, data_len, data_ptr);
+
+	new_hdr48 = (struct gsm48_hdr *) msgb_push(out, sizeof(*hdr48) + 1);
+	memcpy(new_hdr48, hdr48, sizeof(*hdr48));
+	new_hdr48->data[0] = msgb_l3len(out);
+
+	talloc_free(new_number);
+	return out;
+}
+
+struct msgb *bsc_nat_rewrite_msg(struct bsc_nat *nat, struct msgb *msg, struct bsc_nat_parsed *parsed, const char *imsi)
+{
+	struct gsm48_hdr *hdr48;
+	uint32_t len;
+	uint8_t msg_type, proto;
+	struct msgb *new_msg = NULL, *sccp;
+
+	if (!imsi || strlen(imsi) < 5)
+		return msg;
+
+	/* only care about DTAP messages */
+	if (parsed->bssap != BSSAP_MSG_DTAP)
+		return msg;
+	if (!parsed->dest_local_ref)
+		return msg;
+
+	hdr48 = bsc_unpack_dtap(parsed, msg, &len);
+	if (!hdr48)
+		return msg;
+
+	proto = hdr48->proto_discr & 0x0f;
+	msg_type = hdr48->msg_type & 0xbf;
+
+	if (proto == GSM48_PDISC_CC && msg_type == GSM48_MT_CC_SETUP)
+		new_msg = rewrite_setup(nat, msg, parsed, imsi, hdr48, len);
+	else if (proto == GSM48_PDISC_SMS && msg_type == GSM411_MT_CP_DATA)
+		new_msg = rewrite_smsc(nat, msg, parsed, imsi, hdr48, len);
+
+	if (!new_msg)
+		return msg;
+
 	/* wrap with DTAP, SCCP, then IPA. TODO: Stop copying */
-	gsm0808_prepend_dtap_header(out, 0);
-	sccp = sccp_create_dt1(parsed->dest_local_ref, out->data, out->len);
+	gsm0808_prepend_dtap_header(new_msg, 0);
+	sccp = sccp_create_dt1(parsed->dest_local_ref, new_msg->data, new_msg->len);
+	talloc_free(new_msg);
+
 	if (!sccp) {
 		LOGP(DNAT, LOGL_ERROR, "Failed to allocate.\n");
-		talloc_free(new_number);
-		talloc_free(out);
 		return msg;
 	}
 
 	ipaccess_prepend_header(sccp, IPAC_PROTO_SCCP);
 
-	/* give up memory, we are done */
-	talloc_free(new_number);
 	/* the parsed hangs off from msg but it needs to survive */
 	talloc_steal(sccp, parsed);
 	msgb_free(msg);
-	msgb_free(out);
-	out = NULL;
 	return sccp;
 }
 
+static void num_rewr_free_data(struct bsc_nat_num_rewr_entry *entry)
+{
+	regfree(&entry->msisdn_reg);
+	regfree(&entry->num_reg);
+	talloc_free(entry->replace);
+}
+
+void bsc_nat_num_rewr_entry_adapt(void *ctx, struct llist_head *head,
+				  const struct osmo_config_list *list)
+{
+	struct bsc_nat_num_rewr_entry *entry, *tmp;
+	struct osmo_config_entry *cfg_entry;
+
+	/* free the old data */
+	llist_for_each_entry_safe(entry, tmp, head, list) {
+		num_rewr_free_data(entry);
+		llist_del(&entry->list);
+		talloc_free(entry);
+	}
+
+
+	if (!list)
+		return;
+
+	llist_for_each_entry(cfg_entry, &list->entry, list) {
+		char *regexp;
+		if (cfg_entry->text[0] == '+') {
+			LOGP(DNAT, LOGL_ERROR,
+				"Plus is not allowed in the number\n");
+			continue;
+		}
+
+		entry = talloc_zero(ctx, struct bsc_nat_num_rewr_entry);
+		if (!entry) {
+			LOGP(DNAT, LOGL_ERROR,
+				"Allication of the num_rewr entry failed.\n");
+			continue;
+		}
+
+		entry->replace = talloc_strdup(entry, cfg_entry->text);
+		if (!entry->replace) {
+			LOGP(DNAT, LOGL_ERROR,
+				"Failed to copy the replacement text.\n");
+			talloc_free(entry);
+			continue;
+		}
+
+		/* we will now build a regexp string */
+		if (cfg_entry->mcc[0] == '^') {
+			regexp = talloc_strdup(entry, cfg_entry->mcc);
+		} else {
+			regexp = talloc_asprintf(entry, "^%s%s",
+					cfg_entry->mcc[0] == '*' ?
+						"[0-9][0-9][0-9]" : cfg_entry->mcc,
+					cfg_entry->mnc[0] == '*' ?
+						"[0-9][0-9]" : cfg_entry->mnc);
+		}
+
+		if (!regexp) {
+			LOGP(DNAT, LOGL_ERROR, "Failed to create a regexp string.\n");
+			talloc_free(entry);
+			continue;
+		}
+
+		if (regcomp(&entry->msisdn_reg, regexp, 0) != 0) {
+			LOGP(DNAT, LOGL_ERROR,
+				"Failed to compile regexp '%s'\n", regexp);
+			talloc_free(regexp);
+			talloc_free(entry);
+			continue;
+		}
+
+		talloc_free(regexp);
+		if (regcomp(&entry->num_reg, cfg_entry->option, REG_EXTENDED) != 0) {
+			LOGP(DNAT, LOGL_ERROR,
+				"Failed to compile regexp '%s\n'", cfg_entry->option);
+			regfree(&entry->msisdn_reg);
+			talloc_free(entry);
+			continue;
+		}
+
+		/* we have copied the number */
+		llist_add_tail(&entry->list, head);
+	}
+}

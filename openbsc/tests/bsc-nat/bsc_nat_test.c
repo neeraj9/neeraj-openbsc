@@ -854,7 +854,7 @@ static void test_setup_rewrite()
 	entry.option = "^0([1-9])";
 	entry.text = "0049";
 	llist_add_tail(&entry.list, &entries.entry);
-	nat->num_rewr = &entries;
+	bsc_nat_num_rewr_entry_adapt(nat, &nat->num_rewr, &entries);
 
 	/* verify that nothing changed */
 	msgb_reset(msg);
@@ -865,7 +865,7 @@ static void test_setup_rewrite()
 		abort();
 	}
 
-	out = bsc_nat_rewrite_setup(nat, msg, parsed, imsi);
+	out = bsc_nat_rewrite_msg(nat, msg, parsed, imsi);
 	if (msg != out) {
 		fprintf(stderr, "FAIL: The message should not have been changed\n");
 		abort();
@@ -891,7 +891,7 @@ static void test_setup_rewrite()
 		abort();
 	}
 
-	out = bsc_nat_rewrite_setup(nat, msg, parsed, imsi);
+	out = bsc_nat_rewrite_msg(nat, msg, parsed, imsi);
 	if (!out) {
 		fprintf(stderr, "FAIL: A new message should be created.\n");
 		abort();
@@ -917,6 +917,7 @@ static void test_setup_rewrite()
 
 	/* Make sure that a wildcard is matching */
 	entry.mnc = "*";
+	bsc_nat_num_rewr_entry_adapt(nat, &nat->num_rewr, &entries);
 	msg = msgb_alloc(4096, "test_dt_filter");
 	copy_to_msg(msg, cc_setup_national, ARRAY_SIZE(cc_setup_national));
 	parsed = bsc_nat_parse(msg);
@@ -925,7 +926,7 @@ static void test_setup_rewrite()
 		abort();
 	}
 
-	out = bsc_nat_rewrite_setup(nat, msg, parsed, imsi);
+	out = bsc_nat_rewrite_msg(nat, msg, parsed, imsi);
 	if (!out) {
 		fprintf(stderr, "FAIL: A new message should be created.\n");
 		abort();
@@ -951,6 +952,7 @@ static void test_setup_rewrite()
 
 	/* Make sure that a wildcard is matching */
 	entry.mnc = "09";
+	bsc_nat_num_rewr_entry_adapt(nat, &nat->num_rewr, &entries);
 	msg = msgb_alloc(4096, "test_dt_filter");
 	copy_to_msg(msg, cc_setup_national, ARRAY_SIZE(cc_setup_national));
 	parsed = bsc_nat_parse(msg);
@@ -959,7 +961,7 @@ static void test_setup_rewrite()
 		abort();
 	}
 
-	out = bsc_nat_rewrite_setup(nat, msg, parsed, imsi);
+	out = bsc_nat_rewrite_msg(nat, msg, parsed, imsi);
 	if (out != msg) {
 		fprintf(stderr, "FAIL: The message should be unchanged.\n");
 		abort();
@@ -978,6 +980,57 @@ static void test_setup_rewrite()
 	msgb_free(out);
 }
 
+static void test_smsc_rewrite()
+{
+	struct msgb *msg = msgb_alloc(4096, "SMSC rewrite"), *out;
+	struct bsc_nat_parsed *parsed;
+	const char *imsi = "515039900406700";
+
+	struct bsc_nat *nat = bsc_nat_alloc();
+
+	/* a fake list */
+	struct osmo_config_list smsc_entries, dest_entries;
+	struct osmo_config_entry smsc_entry, dest_entry;
+
+	INIT_LLIST_HEAD(&smsc_entries.entry);
+	INIT_LLIST_HEAD(&dest_entries.entry);
+	smsc_entry.mcc = "^515039";
+	smsc_entry.option = "639180000105()";
+	smsc_entry.text   = "6666666666667";
+	llist_add_tail(&smsc_entry.list, &smsc_entries.entry);
+	dest_entry.mcc = "515";
+	dest_entry.mnc = "03";
+	dest_entry.option = "^0049";
+	dest_entry.text   = "";
+	llist_add_tail(&dest_entry.list, &dest_entries.entry);
+
+	bsc_nat_num_rewr_entry_adapt(nat, &nat->smsc_rewr, &smsc_entries);
+	bsc_nat_num_rewr_entry_adapt(nat, &nat->tpdest_match, &dest_entries);
+
+	copy_to_msg(msg, smsc_rewrite, ARRAY_SIZE(smsc_rewrite));
+	parsed = bsc_nat_parse(msg);
+	if (!parsed) {
+		fprintf(stderr, "FAIL: Could not parse SMS\n");
+		abort();
+	}
+
+	out = bsc_nat_rewrite_msg(nat, msg, parsed, imsi);
+	if (out == msg) {
+		fprintf(stderr, "FAIL: This should have changed.\n");
+		abort();
+	}
+
+	if (out->len != ARRAY_SIZE(smsc_rewrite_patched)) {
+		fprintf(stderr, "FAIL: The size should match.\n");
+		abort();
+	}
+
+	if (memcmp(out->data, smsc_rewrite_patched, out->len) != 0) {
+		fprintf(stderr, "FAIL: the data should be changed.\n");
+		abort();
+	}
+}
+
 int main(int argc, char **argv)
 {
 	sccp_set_log_area(DSCCP);
@@ -993,6 +1046,7 @@ int main(int argc, char **argv)
 	test_cr_filter();
 	test_dt_filter();
 	test_setup_rewrite();
+	test_smsc_rewrite();
 	test_mgcp_allocations();
 	return 0;
 }
