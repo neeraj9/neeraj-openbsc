@@ -10,10 +10,6 @@ int gsm48_tx_gsm_act_pdp_rej(struct sgsn_mm_ctx *mm, uint8_t tid,
 int gsm48_tx_gsm_act_pdp_acc(struct sgsn_pdp_ctx *pdp);
 int gsm48_tx_gsm_deact_pdp_acc(struct sgsn_pdp_ctx *pdp);
 
-#ifdef DIRTY_HACK
-int gsm0408_gprs_out_of_seq_rcvmsg(struct msgb *msg, struct gprs_llc_llme *llme);
-#endif
-
 int gsm0408_gprs_rcvmsg(struct msgb *msg, struct gprs_llc_llme *llme);
 
 int gprs_gmm_rx_suspend(struct gprs_ra_id *raid, uint32_t tlli);
