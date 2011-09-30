@@ -19,10 +19,6 @@ enum {
 	DSMS,
 	DPAG,
 	DMEAS,
-	DMI,
-	DMIB,
-	DMUX,
-	DINP,
 	DSCCP,
 	DMSC,
 	DMGCP,
@@ -35,6 +31,7 @@ enum {
 	DLLC,
 	DSNDCP,
 	DNAT,
+	DCTRL,
 	Debug_LastEntry,
 };
 

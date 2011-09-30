@@ -41,7 +41,7 @@
 #include <openbsc/chan_alloc.h>
 #include <openbsc/paging.h>
 #include <openbsc/signal.h>
-#include <openbsc/trau_frame.h>
+#include <osmocom/abis/trau_frame.h>
 #include <openbsc/trau_mux.h>
 #include <openbsc/rtp_proxy.h>
 #include <openbsc/transaction.h>
@@ -49,6 +49,7 @@
 #include <openbsc/silent_call.h>
 #include <openbsc/bsc_api.h>
 #include <openbsc/osmo_msc.h>
+#include <osmocom/abis/e1_input.h>
 #include <osmocom/core/bitvec.h>
 
 #include <osmocom/gsm/gsm48.h>
@@ -94,17 +95,22 @@ static int gsm48_conn_sendmsg(struct msgb *msg, struct gsm_subscriber_connection
 
 
 	if (msg->lchan) {
-		msg->trx = msg->lchan->ts->trx;
+		struct e1inp_sign_link *sign_link =
+				msg->lchan->ts->trx->rsl_link;
+
+		msg->dst = sign_link;
 		if ((gh->proto_discr & GSM48_PDISC_MASK) == GSM48_PDISC_CC)
 			DEBUGP(DCC, "(bts %d trx %d ts %d ti %02x) "
-				"Sending '%s' to MS.\n", msg->trx->bts->nr,
-				msg->trx->nr, msg->lchan->ts->nr,
+				"Sending '%s' to MS.\n",
+				sign_link->trx->bts->nr,
+				sign_link->trx->nr, msg->lchan->ts->nr,
 				gh->proto_discr & 0xf0,
 				gsm48_cc_msg_name(gh->msg_type));
 		else
 			DEBUGP(DCC, "(bts %d trx %d ts %d pd %02x) "
-				"Sending 0x%02x to MS.\n", msg->trx->bts->nr,
-				msg->trx->nr, msg->lchan->ts->nr,
+				"Sending 0x%02x to MS.\n",
+				sign_link->trx->bts->nr,
+				sign_link->trx->nr, msg->lchan->ts->nr,
 				gh->proto_discr, gh->msg_type);
 	}
 
@@ -874,6 +880,7 @@ static int gsm48_rx_mm_serv_req(struct gsm_subscriber_connection *conn, struct m
 
 static int gsm48_rx_mm_imsi_detach_ind(struct msgb *msg)
 {
+	struct e1inp_sign_link *sign_link = msg->lchan->ts->trx->rsl_link;
 	struct gsm_bts *bts = msg->lchan->ts->trx->bts;
 	struct gsm48_hdr *gh = msgb_l3(msg);
 	struct gsm48_imsi_detach_ind *idi =
@@ -907,7 +914,7 @@ static int gsm48_rx_mm_imsi_detach_ind(struct msgb *msg)
 	}
 
 	if (subscr) {
-		subscr_update(subscr, msg->trx->bts,
+		subscr_update(subscr, sign_link->trx->bts,
 				GSM_SUBSCRIBER_UPDATE_DETACHED);
 		DEBUGP(DMM, "Subscriber: %s\n", subscr_name(subscr));
 
@@ -1602,7 +1609,7 @@ static int tch_map(struct gsm_lchan *lchan, struct gsm_lchan *remote_lchan)
 		remote_bts->nr, remote_lchan->ts->trx->nr, remote_lchan->ts->nr);
 
 	if (bts->type != remote_bts->type) {
-		DEBUGP(DCC, "Cannot switch calls between different BTS types yet\n");
+		LOGP(DCC, LOGL_ERROR, "Cannot switch calls between different BTS types yet\n");
 		return -EINVAL;
 	}
 
@@ -1634,10 +1641,11 @@ static int tch_map(struct gsm_lchan *lchan, struct gsm_lchan *remote_lchan)
 		break;
 	case GSM_BTS_TYPE_BS11:
 	case GSM_BTS_TYPE_RBS2000:
+	case GSM_BTS_TYPE_NOKIA_SITE:
 		trau_mux_map_lchan(lchan, remote_lchan);
 		break;
 	default:
-		DEBUGP(DCC, "Unknown BTS type %u\n", bts->type);
+		LOGP(DCC, LOGL_ERROR, "Unknown BTS type %u\n", bts->type);
 		return -EINVAL;
 	}
 
@@ -1680,7 +1688,7 @@ static int tch_recv_mncc(struct gsm_network *net, uint32_t callref, int enable)
 	switch (bts->type) {
 	case GSM_BTS_TYPE_NANOBTS:
 		if (ipacc_rtp_direct) {
-			DEBUGP(DCC, "Error: RTP proxy is disabled\n");
+			LOGP(DCC, LOGL_ERROR, "Error: RTP proxy is disabled\n");
 			return -EINVAL;
 		}
 		/* in case, we don't have a RTP socket yet, we note this
@@ -1704,12 +1712,13 @@ static int tch_recv_mncc(struct gsm_network *net, uint32_t callref, int enable)
 		break;
 	case GSM_BTS_TYPE_BS11:
 	case GSM_BTS_TYPE_RBS2000:
+	case GSM_BTS_TYPE_NOKIA_SITE:
 		if (enable)
 			return trau_recv_lchan(lchan, callref);
 		return trau_mux_unmap(NULL, callref);
 		break;
 	default:
-		DEBUGP(DCC, "Unknown BTS type %u\n", bts->type);
+		LOGP(DCC, LOGL_ERROR, "Unknown BTS type %u\n", bts->type);
 		return -EINVAL;
 	}
 
@@ -1830,6 +1839,8 @@ static int gsm48_cc_rx_setup(struct gsm_trans *trans, struct msgb *msg)
 
 	memset(&setup, 0, sizeof(struct gsm_mncc));
 	setup.callref = trans->callref;
+	if (trans->conn && trans->conn->lchan)
+		setup.lchan_type = trans->conn->lchan->type;
 	tlv_parse(&tp, &gsm48_att_tlvdef, gh->data, payload_len, 0, 0);
 	/* emergency setup is identified by msg_type */
 	if (msg_type == GSM48_MT_CC_EMERG_SETUP)
@@ -1986,6 +1997,8 @@ static int gsm48_cc_rx_call_conf(struct gsm_trans *trans, struct msgb *msg)
 
 	memset(&call_conf, 0, sizeof(struct gsm_mncc));
 	call_conf.callref = trans->callref;
+	if (trans->conn && trans->conn->lchan)
+		call_conf.lchan_type = trans->conn->lchan->type;
 	tlv_parse(&tp, &gsm48_att_tlvdef, gh->data, payload_len, 0, 0);
 #if 0
 	/* repeat */
@@ -2989,9 +3002,10 @@ int mncc_tx_to_cc(struct gsm_network *net, int msg_type, void *arg)
 			return rtp_send_frame(trans->conn->lchan->abis_ip.rtp_socket, arg);
 		case GSM_BTS_TYPE_BS11:
 		case GSM_BTS_TYPE_RBS2000:
+		case GSM_BTS_TYPE_NOKIA_SITE:
 			return trau_send_frame(trans->conn->lchan, arg);
 		default:
-			DEBUGP(DCC, "Unknown BTS type %u\n", bts->type);
+			LOGP(DCC, LOGL_ERROR, "Unknown BTS type %u\n", bts->type);
 		}
 		return -EINVAL;
 	}

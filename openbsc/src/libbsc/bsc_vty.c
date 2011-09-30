@@ -30,7 +30,7 @@
 
 #include <osmocom/core/linuxlist.h>
 #include <openbsc/gsm_data.h>
-#include <openbsc/e1_input.h>
+#include <osmocom/abis/e1_input.h>
 #include <openbsc/abis_nm.h>
 #include <openbsc/abis_om2000.h>
 #include <osmocom/core/utils.h>
@@ -189,9 +189,9 @@ static void net_dump_vty(struct vty *vty, struct gsm_network *net)
 	dump_pchan_load_vty(vty, "    ", &pl);
 
 	/* show rf */
-	if (net->msc_data && net->msc_data->rf_ctl)
+	if (net->msc_data && net->msc_data->rf_ctrl)
 		vty_out(vty, "  Last RF Command: %s%s",
-			net->msc_data->rf_ctl->last_state_command,
+			net->msc_data->rf_ctrl->last_state_command,
 			VTY_NEWLINE);
 }
 
@@ -506,10 +506,13 @@ static void config_write_bts_single(struct vty *vty, struct gsm_bts *bts)
 	case GSM_BTS_TYPE_NANOBTS:
 		vty_out(vty, "  ip.access unit_id %u %u%s",
 			bts->ip_access.site_id, bts->ip_access.bts_id, VTY_NEWLINE);
-		vty_out(vty, "  oml ip.access stream_id %u%s", bts->oml_tei, VTY_NEWLINE);
+		vty_out(vty, "  oml ip.access stream_id %u line %u%s",
+			bts->oml_tei, bts->oml_e1_link.e1_nr, VTY_NEWLINE);
 		break;
 	case GSM_BTS_TYPE_HSL_FEMTO:
 		vty_out(vty, "  hsl serial-number %lu%s", bts->hsl.serno, VTY_NEWLINE);
+		vty_out(vty, "  oml hsl line %u%s",
+			bts->oml_e1_link.e1_nr, VTY_NEWLINE);
 		break;
 	default:
 		config_write_e1_link(vty, &bts->oml_e1_link, "  oml ");
@@ -942,7 +945,7 @@ static int lchan_summary(struct vty *vty, int argc, const char **argv,
 				for (lchan_nr = 0; lchan_nr < TS_MAX_LCHAN;
 				     lchan_nr++) {
 					lchan = &ts->lchan[lchan_nr];
-					if (lchan->type == GSM_LCHAN_NONE)
+					if ((lchan->type == GSM_LCHAN_NONE) && (lchan->state == LCHAN_S_NONE))
 						continue;
 					dump_cb(vty, lchan);
 				}
@@ -973,116 +976,6 @@ DEFUN(show_lchan_summary,
 	"Logical Channel Number\n")
 {
 	return lchan_summary(vty, argc, argv, lchan_dump_short_vty);
-}
-
-static void e1drv_dump_vty(struct vty *vty, struct e1inp_driver *drv)
-{
-	vty_out(vty, "E1 Input Driver %s%s", drv->name, VTY_NEWLINE);
-}
-
-DEFUN(show_e1drv,
-      show_e1drv_cmd,
-      "show e1_driver",
-	SHOW_STR "Display information about available E1 drivers\n")
-{
-	struct e1inp_driver *drv;
-
-	llist_for_each_entry(drv, &e1inp_driver_list, list)
-		e1drv_dump_vty(vty, drv);
-
-	return CMD_SUCCESS;
-}
-
-static void e1line_dump_vty(struct vty *vty, struct e1inp_line *line)
-{
-	vty_out(vty, "E1 Line Number %u, Name %s, Driver %s%s",
-		line->num, line->name ? line->name : "",
-		line->driver->name, VTY_NEWLINE);
-}
-
-DEFUN(show_e1line,
-      show_e1line_cmd,
-      "show e1_line [line_nr]",
-	SHOW_STR "Display information about a E1 line\n"
-	"E1 Line Number\n")
-{
-	struct e1inp_line *line;
-
-	if (argc >= 1) {
-		int num = atoi(argv[0]);
-		llist_for_each_entry(line, &e1inp_line_list, list) {
-			if (line->num == num) {
-				e1line_dump_vty(vty, line);
-				return CMD_SUCCESS;
-			}
-		}
-		return CMD_WARNING;
-	}	
-	
-	llist_for_each_entry(line, &e1inp_line_list, list)
-		e1line_dump_vty(vty, line);
-
-	return CMD_SUCCESS;
-}
-
-static void e1ts_dump_vty(struct vty *vty, struct e1inp_ts *ts)
-{
-	if (ts->type == E1INP_TS_TYPE_NONE)
-		return;
-	vty_out(vty, "E1 Timeslot %2u of Line %u is Type %s%s",
-		ts->num, ts->line->num, e1inp_tstype_name(ts->type),
-		VTY_NEWLINE);
-}
-
-DEFUN(show_e1ts,
-      show_e1ts_cmd,
-      "show e1_timeslot [line_nr] [ts_nr]",
-	SHOW_STR "Display information about a E1 timeslot\n"
-	"E1 Line Number\n" "E1 Timeslot Number\n")
-{
-	struct e1inp_line *line = NULL;
-	struct e1inp_ts *ts;
-	int ts_nr;
-
-	if (argc == 0) {
-		llist_for_each_entry(line, &e1inp_line_list, list) {
-			for (ts_nr = 0; ts_nr < NUM_E1_TS; ts_nr++) {
-				ts = &line->ts[ts_nr];
-				e1ts_dump_vty(vty, ts);
-			}
-		}
-		return CMD_SUCCESS;
-	}
-	if (argc >= 1) {
-		int num = atoi(argv[0]);
-		llist_for_each_entry(line, &e1inp_line_list, list) {
-			if (line->num == num)
-				break;
-		}
-		if (!line || line->num != num) {
-			vty_out(vty, "E1 line %s is invalid%s",
-				argv[0], VTY_NEWLINE);
-			return CMD_WARNING;
-		}
-	}	
-	if (argc >= 2) {
-		ts_nr = atoi(argv[1]);
-		if (ts_nr > NUM_E1_TS) {
-			vty_out(vty, "E1 timeslot %s is invalid%s",
-				argv[1], VTY_NEWLINE);
-			return CMD_WARNING;
-		}
-		ts = &line->ts[ts_nr];
-		e1ts_dump_vty(vty, ts);
-		return CMD_SUCCESS;
-	} else {
-		for (ts_nr = 0; ts_nr < NUM_E1_TS; ts_nr++) {
-			ts = &line->ts[ts_nr];
-			e1ts_dump_vty(vty, ts);
-		}
-		return CMD_SUCCESS;
-	}
-	return CMD_SUCCESS;
 }
 
 static void paging_dump_vty(struct vty *vty, struct gsm_paging_request *pag)
@@ -1157,7 +1050,7 @@ DEFUN(cfg_net_ncc,
 
 DEFUN(cfg_net_mnc,
       cfg_net_mnc_cmd,
-      "mobile network code <1-999>",
+      "mobile network code <0-999>",
       "Set the GSM mobile network code")
 {
 	struct gsm_network *gsmnet = gsmnet_from_vty(vty);
@@ -1617,12 +1510,12 @@ DEFUN(cfg_bts_serno,
 
 DEFUN(cfg_bts_stream_id,
       cfg_bts_stream_id_cmd,
-      "oml ip.access stream_id <0-255>",
+      "oml ip.access stream_id <0-255> line E1_LINE",
 	OML_STR IPA_STR
       "Set the ip.access Stream ID of the OML link of this BTS\n")
 {
 	struct gsm_bts *bts = vty->index;
-	int stream_id = atoi(argv[0]);
+	int stream_id = atoi(argv[0]), linenr = atoi(argv[1]);
 
 	if (!is_ipaccess_bts(bts)) {
 		vty_out(vty, "%% BTS is not of ip.access type%s", VTY_NEWLINE);
@@ -1630,6 +1523,27 @@ DEFUN(cfg_bts_stream_id,
 	}
 
 	bts->oml_tei = stream_id;
+	/* This is used by e1inp_bind_ops callback for each BTS model. */
+	bts->oml_e1_link.e1_nr = linenr;
+
+	return CMD_SUCCESS;
+}
+
+DEFUN(cfg_bts_hsl_oml,
+      cfg_bts_hsl_oml_cmd,
+      "oml hsl line E1_LINE",
+      OML_STR "HSL femto Specific Options"
+      "Set OML link of this HSL femto BTS\n")
+{
+	struct gsm_bts *bts = vty->index;
+	int linenr = atoi(argv[0]);
+
+	if (!(bts->type == GSM_BTS_TYPE_HSL_FEMTO)) {
+		vty_out(vty, "%% BTS is not of HSL type%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
+
+	bts->oml_e1_link.e1_nr = linenr;
 
 	return CMD_SUCCESS;
 }
@@ -2675,10 +2589,6 @@ int bsc_vty_init(const struct log_info *cat)
 	install_element_ve(&show_lchan_summary_cmd);
 	install_element_ve(&logging_fltr_imsi_cmd);
 
-	install_element_ve(&show_e1drv_cmd);
-	install_element_ve(&show_e1line_cmd);
-	install_element_ve(&show_e1ts_cmd);
-
 	install_element_ve(&show_paging_cmd);
 
 	logging_vty_add_cmds(cat);
@@ -2738,6 +2648,7 @@ int bsc_vty_init(const struct log_info *cat)
 	install_element(BTS_NODE, &cfg_bts_unit_id_cmd);
 	install_element(BTS_NODE, &cfg_bts_serno_cmd);
 	install_element(BTS_NODE, &cfg_bts_stream_id_cmd);
+	install_element(BTS_NODE, &cfg_bts_hsl_oml_cmd);
 	install_element(BTS_NODE, &cfg_bts_oml_e1_cmd);
 	install_element(BTS_NODE, &cfg_bts_oml_e1_tei_cmd);
 	install_element(BTS_NODE, &cfg_bts_challoc_cmd);

@@ -677,8 +677,9 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 	/* MS Radio Access Capability 10.5.5.12a */
 	ms_ra_acc_cap_len = *cur++;
 	ms_ra_acc_cap = cur;
-	if (ms_ra_acc_cap_len > 51)
+	if (ms_ra_acc_cap_len > 52)
 		goto err_inval;
+	cur += ms_ra_acc_cap_len;
 
 	/* Optional: Old P-TMSI Signature, Requested READY timer, TMSI Status */
 
@@ -741,8 +742,10 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 	ctx->cell_id = cid;
 	/* Update MM Context with other data */
 	ctx->drx_parms = drx_par;
-	ctx->ms_radio_access_capa.len = ms_ra_acc_cap_len;
-	memcpy(ctx->ms_radio_access_capa.buf, ms_ra_acc_cap, ms_ra_acc_cap_len);
+	ctx->ms_radio_access_capa.len = OSMO_MIN(ms_ra_acc_cap_len,
+					 sizeof((ctx->ms_radio_access_capa.buf)));
+	memcpy(ctx->ms_radio_access_capa.buf, ms_ra_acc_cap,
+		ctx->ms_radio_access_capa.len);
 	ctx->ms_network_capa.len = msnc_len;
 	memcpy(ctx->ms_network_capa.buf, msnc, msnc_len);
 
@@ -760,7 +763,7 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 			  GPRS_ALGO_GEA0, NULL);
 
 	DEBUGPC(DMM, "\n");
-	return ctx ? gsm48_gmm_authorize(ctx, GMM_T3350_MODE_ATT) : 0;
+	return gsm48_gmm_authorize(ctx, GMM_T3350_MODE_ATT);
 
 err_inval:
 	DEBUGPC(DMM, "\n");
@@ -870,7 +873,7 @@ static int gsm48_tx_gmm_ra_upd_rej(struct msgb *old_msg, uint8_t cause)
 }
 
 static void process_ms_ctx_status(struct sgsn_mm_ctx *mmctx,
-				  uint16_t pdp_status)
+				  uint8_t *pdp_status)
 {
 	struct sgsn_pdp_ctx *pdp, *pdp2;
 	/* 24.008 4.7.5.1.3: If the PDP context status information element is
@@ -881,11 +884,20 @@ static void process_ms_ctx_status(struct sgsn_mm_ctx *mmctx,
 	 * being in state PDP-INACTIVE. */
 
 	llist_for_each_entry_safe(pdp, pdp2, &mmctx->pdp_list, list) {
-		if (!(pdp_status & (1 << pdp->nsapi))) {
-			LOGP(DMM, LOGL_NOTICE, "Dropping PDP context for NSAPI=%u "
-				"due to PDP CTX STATUS IE= 0x%04x\n",
-				pdp->nsapi, pdp_status);
-			sgsn_delete_pdp_ctx(pdp);
+		if (pdp->nsapi < 8) {
+			if (!(pdp_status[0] & (1 << pdp->nsapi))) {
+				LOGP(DMM, LOGL_NOTICE, "Dropping PDP context for NSAPI=%u "
+					"due to PDP CTX STATUS IE= 0x%02x%02x\n",
+					pdp->nsapi, pdp_status[1], pdp_status[0]);
+				sgsn_delete_pdp_ctx(pdp);
+			}
+		} else {
+			if (!(pdp_status[1] & (1 << (pdp->nsapi - 8)))) {
+				LOGP(DMM, LOGL_NOTICE, "Dropping PDP context for NSAPI=%u "
+					"due to PDP CTX STATUS IE= 0x%02x%02x\n",
+					pdp->nsapi, pdp_status[1], pdp_status[0]);
+				sgsn_delete_pdp_ctx(pdp);
+			}
 		}
 	}
 }
@@ -916,6 +928,9 @@ static int gsm48_rx_gmm_ra_upd_req(struct sgsn_mm_ctx *mmctx, struct msgb *msg,
 	/* MS Radio Access Capability 10.5.5.12a */
 	ms_ra_acc_cap_len = *cur++;
 	ms_ra_acc_cap = cur;
+	if (ms_ra_acc_cap_len > 52)
+		return gsm48_tx_gmm_ra_upd_rej(msg, GMM_CAUSE_PROTO_ERR_UNSPEC);
+	cur += ms_ra_acc_cap_len;
 
 	/* Optional: Old P-TMSI Signature, Requested READY timer, TMSI Status,
 	 * DRX parameter, MS network capability */
@@ -975,8 +990,7 @@ static int gsm48_rx_gmm_ra_upd_req(struct sgsn_mm_ctx *mmctx, struct msgb *msg,
 	/* Look at PDP Context Status IE and see if MS's view of
 	 * activated/deactivated NSAPIs agrees with our view */
 	if (TLVP_PRESENT(&tp, GSM48_IE_GMM_PDP_CTX_STATUS)) {
-		uint16_t pdp_status = ntohs(*(uint16_t *)
-				TLVP_VAL(&tp, GSM48_IE_GMM_PDP_CTX_STATUS));
+		uint8_t *pdp_status = TLVP_VAL(&tp, GSM48_IE_GMM_PDP_CTX_STATUS);
 		process_ms_ctx_status(mmctx, pdp_status);
 	}
 

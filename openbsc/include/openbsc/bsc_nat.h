@@ -67,6 +67,24 @@ enum {
 };
 
 /*
+ * Pending command entry
+ */
+struct bsc_cmd_list {
+	struct llist_head list_entry;
+
+	struct osmo_timer_list timeout;
+
+	/* The NATed ID used on the bsc_con*/
+	int nat_id;
+
+	/* The control connection from which the command originated */
+	struct ctrl_connection *ccon;
+
+	/* The command from the control connection */
+	struct ctrl_cmd *cmd;
+};
+
+/*
  * Per BSC data structure
  */
 struct bsc_connection {
@@ -93,6 +111,10 @@ struct bsc_connection {
 	int number_multiplexes;
 	int max_endpoints;
 	int last_endpoint;
+
+	/* track the pending commands for this BSC */
+	struct llist_head cmd_pending;
+	int last_id;
 
 	/* a back pointer */
 	struct bsc_nat *nat;
@@ -371,7 +393,6 @@ int bsc_write_msg(struct osmo_wqueue *queue, struct msgb *msg);
 int bsc_write_cb(struct osmo_fd *bfd, struct msgb *msg);
 
 /* IMSI allow/deny handling */
-int bsc_parse_reg(void *ctx, regex_t *reg, char **imsi, int argc, const char **argv) __attribute__ ((warn_unused_result));
 struct bsc_nat_acc_lst *bsc_nat_acc_lst_find(struct bsc_nat *nat, const char *name);
 struct bsc_nat_acc_lst *bsc_nat_acc_lst_get(struct bsc_nat *nat, const char *name);
 void bsc_nat_acc_lst_delete(struct bsc_nat_acc_lst *lst);

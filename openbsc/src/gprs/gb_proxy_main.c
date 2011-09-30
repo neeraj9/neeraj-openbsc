@@ -36,7 +36,6 @@
 #include <osmocom/core/talloc.h>
 #include <osmocom/core/select.h>
 #include <osmocom/core/rate_ctr.h>
-#include <osmocom/core/process.h>
 
 #include <openbsc/signal.h>
 #include <openbsc/debug.h>
@@ -98,7 +97,7 @@ static void signal_handler(int signal)
 
 	switch (signal) {
 	case SIGINT:
-		osmo_signal_dispatch(SS_GLOBAL, S_GLOBAL_SHUTDOWN, NULL);
+		osmo_signal_dispatch(SS_L_GLOBAL, S_L_GLOBAL_SHUTDOWN, NULL);
 		sleep(1);
 		exit(0);
 		break;

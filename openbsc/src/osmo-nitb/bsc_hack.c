@@ -32,9 +32,9 @@
 #include <openbsc/db.h>
 #include <osmocom/core/application.h>
 #include <osmocom/core/select.h>
-#include <osmocom/core/process.h>
 #include <openbsc/debug.h>
-#include <openbsc/e1_input.h>
+#include <osmocom/abis/abis.h>
+#include <osmocom/abis/e1_input.h>
 #include <osmocom/core/talloc.h>
 #include <openbsc/signal.h>
 #include <openbsc/osmo_msc.h>
@@ -42,6 +42,10 @@
 #include <openbsc/vty.h>
 #include <openbsc/bss.h>
 #include <openbsc/mncc.h>
+#include <openbsc/token_auth.h>
+#include <openbsc/handover_decision.h>
+#include <openbsc/rrlp.h>
+#include <openbsc/control_if.h>
 
 #include "../../bscconfig.h"
 
@@ -173,7 +177,7 @@ static void signal_handler(int signal)
 	switch (signal) {
 	case SIGINT:
 		bsc_shutdown_net(bsc_gsmnet);
-		osmo_signal_dispatch(SS_GLOBAL, S_GLOBAL_SHUTDOWN, NULL);
+		osmo_signal_dispatch(SS_L_GLOBAL, S_L_GLOBAL_SHUTDOWN, NULL);
 		sleep(3);
 		exit(0);
 		break;
@@ -228,10 +232,9 @@ int main(int argc, char **argv)
 	on_dso_load_rrlp();
 	on_dso_load_ho_dec();
 
+	libosmo_abis_init(tall_bsc_ctx);
 	osmo_init_logging(&log_info);
-
 	bts_init();
-	e1inp_init();
 
 	/* This needs to precede handle_options() */
 	vty_init(&vty_info);
@@ -251,6 +254,7 @@ int main(int argc, char **argv)
 		exit(1);
 	bsc_api_init(bsc_gsmnet, msc_bsc_api());
 
+	controlif_setup(bsc_gsmnet, 4249);
 	/* seed the PRNG */
 	srand(time(NULL));
 
