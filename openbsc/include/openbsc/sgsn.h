@@ -17,6 +17,9 @@ struct sgsn_config {
 	int local_gtp0_port;
 	int local_gtp1c_port;
 	int local_gtp1u_port;
+	int remote_gtp0_port;
+	int remote_gtp1c_port;
+	int remote_gtp1u_port;
 
 	/* misc */
 	struct gprs_ns_inst *nsi;

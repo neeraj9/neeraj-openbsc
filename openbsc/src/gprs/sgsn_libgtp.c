@@ -560,10 +560,9 @@ int sgsn_gtp_init(struct sgsn_instance *sgi)
 			     sgi->cfg.local_gtp0_port,
 			     sgi->cfg.local_gtp1c_port,
 			     sgi->cfg.local_gtp1u_port,
-			     /* assume that ggsn always uses the default port */
-			     GTP0_PORT,
-			     GTP1C_PORT,
-			     GTP1U_PORT);
+			     sgi->cfg.remote_gtp0_port,
+			     sgi->cfg.remote_gtp1c_port,
+			     sgi->cfg.remote_gtp1u_port);
 	if (rc) {
 		LOGP(DGPRS, LOGL_ERROR, "Failed to create GTP: %d\n", rc);
 		return rc;
